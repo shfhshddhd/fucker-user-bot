@@ -1,14 +1,30 @@
 import sqlite3
 import os
+import threading
 
 DB_PATH = "database/fucker_bot.db"
 
+# Thread lock for database writes
+_db_lock = threading.Lock()
+
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    """Get database connection with WAL mode and timeout"""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    
+    # Enable WAL mode for concurrent reads/writes
+    conn.execute("PRAGMA journal_mode=WAL")
+    
+    # Set busy timeout (ms)
+    conn.execute("PRAGMA busy_timeout=30000")
+    
+    # Enable foreign keys
+    conn.execute("PRAGMA foreign_keys=ON")
+    
     return conn
 
 def init_db():
+    """Initialize database tables"""
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -35,7 +51,7 @@ def init_db():
         )
     """)
     
-    # Groups table - jahan auto-tag kaam karega
+    # Groups table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,17 +67,21 @@ def init_db():
     conn.close()
 
 # --- User functions ---
+
 def add_user(user_id, phone, session_string):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO users (user_id, phone, session_string) VALUES (?, ?, ?)",
-        (user_id, phone, session_string)
-    )
-    conn.commit()
-    conn.close()
+    """Add a new user"""
+    with _db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO users (user_id, phone, session_string) VALUES (?, ?, ?)",
+            (user_id, phone, session_string)
+        )
+        conn.commit()
+        conn.close()
 
 def get_user(user_id):
+    """Get user by ID"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -70,6 +90,7 @@ def get_user(user_id):
     return user
 
 def get_all_users():
+    """Get all active users"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE is_active = 1")
@@ -78,35 +99,58 @@ def get_all_users():
     return users
 
 def remove_user(user_id):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    """Remove user and their targets"""
+    with _db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        # Delete user's targets first
+        cursor.execute("DELETE FROM targets WHERE host_user_id = ?", (user_id,))
+        # Delete user's groups
+        cursor.execute("DELETE FROM groups WHERE host_user_id = ?", (user_id,))
+        # Delete user
+        cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
 
 # --- Target functions ---
+
 def add_target(host_user_id, target_user_id, target_username):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO targets (host_user_id, target_user_id, target_username) VALUES (?, ?, ?)",
-        (host_user_id, target_user_id, target_username)
-    )
-    conn.commit()
-    conn.close()
+    """Add a target for a host"""
+    with _db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO targets (host_user_id, target_user_id, target_username) VALUES (?, ?, ?)",
+            (host_user_id, target_user_id, target_username)
+        )
+        conn.commit()
+        conn.close()
 
 def remove_target(host_user_id, target_identifier):
-    conn = get_connection()
-    cursor = conn.cursor()
-    # Try by username first, then by user_id
-    cursor.execute(
-        "DELETE FROM targets WHERE host_user_id = ? AND (target_username = ? OR target_user_id = ?)",
-        (host_user_id, target_identifier, int(target_identifier) if target_identifier.isdigit() else 0)
-    )
-    conn.commit()
-    conn.close()
+    """Remove target by username or user_id"""
+    with _db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Try by username first (remove @ if present)
+        target_clean = target_identifier.lstrip('@')
+        cursor.execute(
+            "DELETE FROM targets WHERE host_user_id = ? AND target_username = ?",
+            (host_user_id, target_clean)
+        )
+        
+        # If nothing deleted, try by user_id
+        if cursor.rowcount == 0 and target_identifier.isdigit():
+            cursor.execute(
+                "DELETE FROM targets WHERE host_user_id = ? AND target_user_id = ?",
+                (host_user_id, int(target_identifier))
+            )
+        
+        conn.commit()
+        conn.close()
 
 def get_targets(host_user_id):
+    """Get all targets for a specific host"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM targets WHERE host_user_id = ?", (host_user_id,))
@@ -115,6 +159,7 @@ def get_targets(host_user_id):
     return targets
 
 def get_all_targets():
+    """Get ALL targets from all hosts"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM targets")
