@@ -37,7 +37,7 @@ async def main():
     )
 
     await bot.start()
-    print("Fucker User Bot started!")
+    print("🤖 Fucker User Bot started!")
     await idle()
     await bot.stop()
 
